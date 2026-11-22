@@ -42,7 +42,8 @@ function shadow_abs_url(rawLink, baseOrigin = shadow_base_url) {
     !trimmed ||
     trimmed.startsWith("javascript:") ||
     trimmed.startsWith("mailto:") ||
-    trimmed.startsWith("#")
+    trimmed.startsWith("#") ||
+    trimmed.startsWith("data:")
   ) {
     return null;
   }
@@ -63,6 +64,7 @@ function shadow_strip_tags(rawHtml = "") {
     .replace(/&#39;/g, "'")
     .replace(/&ndash;/g, "-")
     .replace(/&hellip;/g, "...")
+    .replace(/&rarr;/g, "→")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -71,6 +73,83 @@ function shadow_is_cf_challenge(htmlText = "") {
   return /__cf_chl_|cf-browser-verification|just a moment\.\.\.|checking your browser before accessing/i.test(
     htmlText
   );
+}
+
+function shadow_is_junk_item(title = "", fullUrl = "", pathname = "") {
+  const t = String(title).trim().toLowerCase();
+  const p = String(pathname).trim().toLowerCase();
+  const u = String(fullUrl).trim().toLowerCase();
+
+  if (
+    p === "/" ||
+    p === "/movies" ||
+    p === "/tv" ||
+    p === "/collections" ||
+    p === "/support" ||
+    p === "/articles" ||
+    p === "/about" ||
+    p === "/contact" ||
+    p === "/contributors" ||
+    p === "/contribute" ||
+    p === "/copyright" ||
+    p === "/cookies" ||
+    p === "/feedback" ||
+    p === "/advertise" ||
+    p.startsWith("/search") ||
+    p.startsWith("/category/") ||
+    p.startsWith("/tag/") ||
+    p.startsWith("/page/") ||
+    p.includes("/author/") ||
+    p.includes("/wp-") ||
+    p.includes("/cdn-cgi/") ||
+    u.includes("?sort=") ||
+    u.includes("?language=") ||
+    u.includes("become-a-contributor") ||
+    /\.(?:jpg|jpeg|png|gif|webp|css|js|xml)$/i.test(p)
+  ) {
+    return true;
+  }
+
+  const junkTitles = new Set([
+    "movies",
+    "tv series",
+    "collections",
+    "support",
+    "become a contributor",
+    "advertise with us",
+    "articles",
+    "latest",
+    "top rated",
+    "english",
+    "tamil",
+    "hindi",
+    "korean",
+    "malayalam",
+    "telugu",
+    "japanese",
+    "sinhala",
+    "about",
+    "contact",
+    "contributors",
+    "dmca / takedown",
+    "privacy",
+    "cookies",
+    "අලුත් site එක ගැන අදහසක්",
+    "give review →",
+    "next →",
+  ]);
+
+  if (junkTitles.has(t) || /^next\b/i.test(t) || /^give review\b/i.test(t)) {
+    return true;
+  }
+
+  // Keep actual movie/tv/subtitle posts
+  const isContentPath = /^\/(?:movies|tv|series|episodes|subtitles)\/[^/]+/i.test(p);
+  const hasMediaHint = /sinhala\s*sub|උපසිරැසි|s\d{1,2}\s*[:e]?\s*e?\d{1,2}|\(\d{4}\)|tv series|movie/i.test(
+    t
+  );
+
+  return !(isContentPath || hasMediaHint);
 }
 
 async function shadow_fetch_html(targetUrl) {
@@ -118,40 +197,27 @@ function shadow_parse_results(html, baseUrl, mode = "all") {
 
     if (!parsed.hostname.endsWith("baiscope.lk")) continue;
     const pLower = parsed.pathname.toLowerCase();
+    const cleanTitle = shadow_strip_tags(anchor[2]);
 
-    if (
-      pLower === "/" ||
-      pLower.startsWith("/category/") ||
-      pLower.startsWith("/tag/") ||
-      pLower.startsWith("/page/") ||
-      pLower.includes("/author/") ||
-      pLower.includes("/wp-") ||
-      pLower.includes("/cdn-cgi/") ||
-      /\.(?:jpg|jpeg|png|gif|webp|css|js|xml)$/i.test(pLower)
-    ) {
-      continue;
-    }
-
+    if (!cleanTitle || cleanTitle.length < 3) continue;
+    if (shadow_is_junk_item(cleanTitle, fullUrl, pLower)) continue;
     if (seenUrls.has(fullUrl)) continue;
 
-    const cleanTitle = shadow_strip_tags(anchor[2]);
-    if (!cleanTitle || cleanTitle.length < 3) continue;
-
     const surrounding = html.slice(
-      Math.max(0, anchor.index - 500),
-      Math.min(html.length, anchor.index + anchor[0].length + 500)
+      Math.max(0, anchor.index - 550),
+      Math.min(html.length, anchor.index + anchor[0].length + 550)
     );
 
     if (mode === "tv") {
       const hay = `${cleanTitle} ${pLower} ${surrounding}`.toLowerCase();
-      if (!/season|episode|s\d{1,2}|e\d{1,2}|series|tv|show|කතාමාලාව/i.test(hay)) {
+      if (!/\/tv\/|season|episode|s\d{1,2}|e\d{1,2}|series|tv series|කතාමාලාව/i.test(hay)) {
         continue;
       }
     }
 
     seenUrls.add(fullUrl);
 
-    const imgMatch = surrounding.match(/<img\b[^>]*?(?:data-src|src)=["']([^"']+)["']/i);
+    const imgMatch = surrounding.match(/<img\b[^>]*?(?:data-src|src)=["'](https?:\/\/[^"']+)["']/i);
     const posterUrl = imgMatch ? shadow_abs_url(imgMatch[1], fullUrl) : null;
 
     items.push({
@@ -168,8 +234,8 @@ async function shadow_search_items(queryText, pageNum = 1, mode = "all") {
   const safePage = Math.max(1, parseInt(pageNum, 10) || 1);
   const searchUrl =
     safePage > 1
-      ? `${shadow_base_url}/page/${safePage}/?s=${encodeURIComponent(queryText)}`
-      : `${shadow_base_url}/?s=${encodeURIComponent(queryText)}`;
+      ? `${shadow_base_url}/search?q=${encodeURIComponent(queryText)}&page=${safePage}`
+      : `${shadow_base_url}/search?q=${encodeURIComponent(queryText)}`;
 
   const fetched = await shadow_fetch_html(searchUrl);
   if (!fetched.ok) {
@@ -226,7 +292,7 @@ async function shadow_scrape_info(targetUrl) {
     "Unknown Title";
 
   const ogImgMatch = html.match(
-    /<meta\b[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i
+    /<meta\b[^>]*property=["']og:image["'][^>]*content=["'](https?:\/\/[^"']+)["']/i
   );
   const image = ogImgMatch ? shadow_abs_url(ogImgMatch[1], fetched.finalUrl) : null;
 
