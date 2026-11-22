@@ -1,6 +1,6 @@
-// baiscope.lk scraper worker (search, info, dl, searchtv, dp)
+// baiscope.lk scraper worker (search, info, dl, searchtv, dp, proxy)
 
-const shadow_creator = "Creator - 👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
+const shadow_creator = "👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
 const shadow_base_url = "https://www.baiscope.lk";
 
 const shadow_headers = {
@@ -293,11 +293,18 @@ function shadow_parse_results(html, baseUrl, mode = "all") {
       Math.min(html.length, anchor.index + anchor[0].length + 550)
     );
 
-    if (mode === "tv") {
-      const hay = `${cleanTitle} ${pLower} ${surrounding}`.toLowerCase();
-      if (!/\/tv\/|season|episode|s\d{1,2}|e\d{1,2}|series|tv series|කතාමාලාව/i.test(hay)) {
-        continue;
-      }
+    const isTvEntry =
+      /\/(?:tv|series|episodes)\//i.test(pLower) ||
+      /\bs\d{1,2}\s*[:e]?\s*e?\d{1,2}\b|\btv series\b|\bseason\b|\bepisode\b|කතාමාලාව/i.test(
+        `${cleanTitle} ${surrounding}`
+      );
+
+    // Strictly separate TV series vs Movies
+    if (mode === "tv" && !isTvEntry) {
+      continue;
+    }
+    if (mode === "movie" && isTvEntry) {
+      continue;
     }
 
     seenUrls.add(fullUrl);
@@ -317,7 +324,7 @@ function shadow_parse_results(html, baseUrl, mode = "all") {
   return items;
 }
 
-async function shadow_search_items(queryText, pageNum = 1, mode = "all") {
+async function shadow_search_items(queryText, pageNum = 1, mode = "movie") {
   const safePage = Math.max(1, parseInt(pageNum, 10) || 1);
   const searchUrl =
     safePage > 1
@@ -453,7 +460,6 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
       /^\/(?:movies|tv|series|episodes)\/[^/]+/i.test(linkPath) &&
       absLink !== fetched.finalUrl;
 
-    // Skip unrelated movie/tv post links unless explicitly a file/mirror/pack host
     const isDirectFileOrHost =
       /\.(?:mp4|mkv|avi|webm|7z|iso|torrent|zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(absLink) ||
       /\/download\/[^/?#]+/i.test(linkPath) ||
@@ -506,6 +512,29 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
   };
 }
 
+async function shadow_proxy_download(targetUrl) {
+  const res = await fetch(targetUrl, {
+    headers: {
+      ...shadow_headers,
+      Referer: `${shadow_base_url}/`,
+    },
+    redirect: "follow",
+  });
+
+  const outHeaders = new Headers();
+  const passthrough = ["content-type", "content-length", "content-disposition"];
+  for (const h of passthrough) {
+    const val = res.headers.get(h);
+    if (val) outHeaders.set(h, val);
+  }
+  outHeaders.set("Access-Control-Allow-Origin", "*");
+
+  return new Response(res.body, {
+    status: res.status,
+    headers: outHeaders,
+  });
+}
+
 export default {
   async fetch(req) {
     if (req.method === "OPTIONS") {
@@ -527,6 +556,7 @@ export default {
             "/dl?url=<baiscope_url>",
             "/searchtv?q=<query>&page=1",
             "/dp?url=<baiscope_url>",
+            "/proxy?url=<download_url>",
           ],
         });
       }
@@ -537,7 +567,7 @@ export default {
         if (!q) {
           return shadow_json({ ok: false, error: "Missing 'q' query parameter" }, 400);
         }
-        const data = await shadow_search_items(q, page, "all");
+        const data = await shadow_search_items(q, page, "movie");
         return shadow_json(data, data.ok ? 200 : 502);
       }
 
@@ -576,6 +606,14 @@ export default {
         }
         const data = await shadow_scrape_links(target, "dp");
         return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/proxy") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target) || shadow_has_telegram(target)) {
+          return shadow_json({ ok: false, error: "Valid non-telegram 'url' required" }, 400);
+        }
+        return await shadow_proxy_download(target);
       }
 
       return shadow_json({ ok: false, error: "Endpoint not found" }, 404);
