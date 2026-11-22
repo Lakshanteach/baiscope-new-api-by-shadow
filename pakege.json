@@ -1,0 +1,13 @@
+{
+  "name": "shadow-baiscope-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Baiscope.lk scraper API on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.99.0"
+  }
+}
