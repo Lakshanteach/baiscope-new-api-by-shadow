@@ -65,7 +65,6 @@ function shadow_is_dead_or_bad_url(fullUrl = "", label = "") {
     return true;
   }
 
-  // Block social share links, comments, categories, tags, search, legal/nav pages
   if (
     /(?:wa\.me|whatsapp\.com|twitter\.com|x\.com|facebook\.com|instagram\.com|pinterest\.com|reddit\.com|t\.me|telegram\.)/i.test(
       host
@@ -440,21 +439,38 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
 
     const label = shadow_strip_tags(anchor[2]) || "Download";
     if (shadow_is_dead_or_bad_url(absLink, label)) continue;
-
-    // Skip image/poster links
     if (/\.(?:jpg|jpeg|png|gif|webp|bmp|svg)(?:\?|$)/i.test(absLink)) continue;
+
+    let parsedLink;
+    try {
+      parsedLink = new URL(absLink);
+    } catch (_) {
+      continue;
+    }
+
+    const linkPath = parsedLink.pathname.toLowerCase();
+    const isOtherPost =
+      /^\/(?:movies|tv|series|episodes)\/[^/]+/i.test(linkPath) &&
+      absLink !== fetched.finalUrl;
+
+    // Skip unrelated movie/tv post links unless explicitly a file/mirror/pack host
+    const isDirectFileOrHost =
+      /\.(?:mp4|mkv|avi|webm|7z|iso|torrent|zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(absLink) ||
+      /\/download\/[^/?#]+/i.test(linkPath) ||
+      /(?:pixeldrain|gdrive|drive\.google\.com|mega\.nz|mediafire\.com|1fichier\.com|gofile\.io|terabox\.com|uptobox\.com|ddl|mirror)/i.test(
+        absLink
+      );
+
+    if (isOtherPost && !isDirectFileOrHost) continue;
 
     const quality = shadow_detect_quality(label, absLink);
     const lowerCombo = `${absLink} ${label}`.toLowerCase();
 
-    // Actual subtitle files / baiscope download endpoints (.zip, .rar, .srt, /download/...)
-    const isSubtitleFile =
+    if (
+      quality === "Subtitle" ||
       /\.(?:zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(absLink) ||
-      /\/download\/[^/?#]+/i.test(absLink) ||
-      (/sub|subtitle|උපසිරැසි/i.test(lowerCombo) &&
-        !/(?:movies|tv|series|episodes)\/[^/]+/i.test(new URL(absLink).pathname));
-
-    if (isSubtitleFile) {
+      /\/download\/[^/?#]+/i.test(linkPath)
+    ) {
       seenLinks.add(absLink);
       subtitles.push({
         label,
@@ -464,10 +480,9 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
       continue;
     }
 
-    // Actual media / pack / mirror / quality download links
     const matchPattern =
       mode === "dp"
-        ? /\.(?:mp4|mkv|avi|webm|7z|iso|torrent)(?:\?|$)|(?:pack|season|batch|episode|ep|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i
+        ? /\.(?:mp4|mkv|avi|webm|7z|iso|torrent)(?:\?|$)|(?:pack|season|batch|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i
         : /\.(?:mp4|mkv|avi|webm|7z|iso|torrent)(?:\?|$)|(?:mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i;
 
     if (matchPattern.test(lowerCombo)) {
