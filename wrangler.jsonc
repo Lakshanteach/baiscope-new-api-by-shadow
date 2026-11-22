@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "shadow-baiscope-api",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-22",
+  "observability": {
+    "enabled": true
+  }
+}
