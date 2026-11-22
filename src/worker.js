@@ -1,6 +1,6 @@
-// baiscope.lk scraper worker (search, info, dl, searchtv, dp, proxy)
+// baiscope.lk scraper worker (search, searchtv, episodes, info, dl, dp, proxy)
 
-const shadow_creator = "👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
+const shadow_creator = "Creator - 👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
 const shadow_base_url = "https://www.baiscope.lk";
 
 const shadow_headers = {
@@ -230,7 +230,7 @@ function shadow_is_junk_item(title = "", fullUrl = "", pathname = "") {
     return true;
   }
 
-  const isContentPath = /^\/(?:movies|tv|series|episodes|subtitles)\/[^/]+/i.test(p);
+  const isContentPath = /^\/(?:movies|tv|tv-series|series|episodes|subtitles)\/[^/]+/i.test(p);
   const hasMediaHint =
     /sinhala\s*sub|උපසිරැසි|s\d{1,2}\s*[:e]?\s*e?\d{1,2}|\(\d{4}\)|tv series|movie/i.test(t);
 
@@ -263,7 +263,7 @@ async function shadow_fetch_html(targetUrl) {
   }
 }
 
-function shadow_parse_results(html, baseUrl, mode = "all") {
+function shadow_parse_results(html, baseUrl, mode = "movie") {
   const seenUrls = new Set();
   const items = [];
 
@@ -294,18 +294,13 @@ function shadow_parse_results(html, baseUrl, mode = "all") {
     );
 
     const isTvEntry =
-      /\/(?:tv|series|episodes)\//i.test(pLower) ||
+      /\/(?:tv|tv-series|series|episodes)\//i.test(pLower) ||
       /\bs\d{1,2}\s*[:e]?\s*e?\d{1,2}\b|\btv series\b|\bseason\b|\bepisode\b|කතාමාලාව/i.test(
         `${cleanTitle} ${surrounding}`
       );
 
-    // Strictly separate TV series vs Movies
-    if (mode === "tv" && !isTvEntry) {
-      continue;
-    }
-    if (mode === "movie" && isTvEntry) {
-      continue;
-    }
+    if (mode === "tv" && !isTvEntry) continue;
+    if (mode === "movie" && isTvEntry) continue;
 
     seenUrls.add(fullUrl);
 
@@ -355,6 +350,76 @@ async function shadow_search_items(queryText, pageNum = 1, mode = "movie") {
     source: fetched.finalUrl,
     total: items.length,
     items,
+  };
+}
+
+async function shadow_scrape_episodes(seriesUrl) {
+  const fetched = await shadow_fetch_html(seriesUrl);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      url: seriesUrl,
+      cloudflareChallenge: fetched.challenged,
+      error: fetched.challenged
+        ? "Blocked by Cloudflare challenge on baiscope.lk"
+        : `HTTP ${fetched.status}`,
+      episodes: [],
+    };
+  }
+
+  const html = fetched.html;
+  const seen = new Set();
+  const episodes = [];
+
+  for (const anchor of html.matchAll(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  )) {
+    const abs = shadow_abs_url(anchor[1], fetched.finalUrl);
+    if (!abs || seen.has(abs) || abs === fetched.finalUrl) continue;
+
+    let parsed;
+    try {
+      parsed = new URL(abs);
+    } catch (_) {
+      continue;
+    }
+
+    if (!parsed.hostname.endsWith("baiscope.lk")) continue;
+    const pLower = parsed.pathname.toLowerCase();
+    const label = shadow_strip_tags(anchor[2]);
+    if (!label || label.length < 2) continue;
+    if (shadow_is_dead_or_bad_url(abs, label)) continue;
+
+    const isEpisodeLink =
+      /\/(?:tv|episodes|series)\/[^/]+/i.test(pLower) ||
+      /\bs\d{1,2}\s*[:e]?\s*e?\d{1,2}\b|\bepisode\s*\d+|\be\d{1,2}\b|\bseason\s*\d+/i.test(
+        `${label} ${pLower}`
+      );
+
+    if (isEpisodeLink) {
+      seen.add(abs);
+      episodes.push({
+        title: label,
+        url: abs,
+      });
+    }
+  }
+
+  // If seriesUrl itself is a single episode page, include it if no child episodes found
+  if (episodes.length === 0) {
+    const h1Match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+    const epTitle = (h1Match && shadow_strip_tags(h1Match[1])) || "Episode";
+    episodes.push({
+      title: epTitle,
+      url: fetched.finalUrl,
+    });
+  }
+
+  return {
+    ok: true,
+    url: fetched.finalUrl,
+    total: episodes.length,
+    episodes,
   };
 }
 
@@ -457,7 +522,7 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
 
     const linkPath = parsedLink.pathname.toLowerCase();
     const isOtherPost =
-      /^\/(?:movies|tv|series|episodes)\/[^/]+/i.test(linkPath) &&
+      /^\/(?:movies|tv|tv-series|series|episodes)\/[^/]+/i.test(linkPath) &&
       absLink !== fetched.finalUrl;
 
     const isDirectFileOrHost =
@@ -552,9 +617,10 @@ export default {
           target: shadow_base_url,
           endpoints: [
             "/search?q=<query>&page=1",
+            "/searchtv?q=<query>&page=1",
+            "/episodes?url=<series_url>",
             "/info?url=<baiscope_url>",
             "/dl?url=<baiscope_url>",
-            "/searchtv?q=<query>&page=1",
             "/dp?url=<baiscope_url>",
             "/proxy?url=<download_url>",
           ],
@@ -578,6 +644,15 @@ export default {
           return shadow_json({ ok: false, error: "Missing 'q' query parameter" }, 400);
         }
         const data = await shadow_search_items(q, page, "tv");
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/episodes") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target)) {
+          return shadow_json({ ok: false, error: "Valid 'url' query parameter required" }, 400);
+        }
+        const data = await shadow_scrape_episodes(target);
         return shadow_json(data, data.ok ? 200 : 502);
       }
 
