@@ -35,6 +35,68 @@ function shadow_json(payload, statusCode = 200) {
   );
 }
 
+function shadow_has_telegram(inputStr = "") {
+  if (!inputStr) return false;
+  const s = String(inputStr).toLowerCase();
+  if (/(?:^|[\s/:?=&@])t\s*\.\s*me(?:\/|$|\s|\?|&)/i.test(s)) return true;
+  if (/telegram\s*\.\s*(?:me|dog|org)|tg\s*:/i.test(s)) return true;
+  if (/\btelegram\b/i.test(s)) return true;
+  return false;
+}
+
+function shadow_is_dead_or_bad_url(fullUrl = "", label = "") {
+  const u = String(fullUrl || "").trim();
+  const l = String(label || "").trim().toLowerCase();
+
+  if (!u || !/^https?:\/\//i.test(u)) return true;
+  if (shadow_has_telegram(u) || shadow_has_telegram(l)) return true;
+
+  let parsed;
+  try {
+    parsed = new URL(u);
+  } catch (_) {
+    return true;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const p = parsed.pathname.toLowerCase();
+
+  if (!host || !host.includes(".") || host === "localhost" || host.endsWith(".local")) {
+    return true;
+  }
+
+  if (
+    p.includes("/cdn-cgi/") ||
+    /\/(?:login|signin|sign-in|signup|register|privacy|terms|cookies|copyright|dmca|contact|feedback|about|advertise)(?:\/|$)/i.test(
+      p
+    ) ||
+    /^(?:privacy|terms|cookies|login|sign in|register|contact|about|dmca)$/i.test(l)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function shadow_detect_quality(label = "", fullUrl = "") {
+  const hay = `${label} ${fullUrl}`.toLowerCase();
+
+  if (/\b(?:2160p|4k|uhd)\b/i.test(hay)) return "2160p (4K)";
+  if (/\b1080p\b/i.test(hay)) return "1080p";
+  if (/\b720p\b/i.test(hay)) return "720p";
+  if (/\b480p\b/i.test(hay)) return "480p";
+  if (/\b360p\b/i.test(hay)) return "360p";
+  if (/\b(?:bluray|blu-ray|bdrip|brrip)\b/i.test(hay)) return "BluRay";
+  if (/\b(?:web-dl|webdl|webrip)\b/i.test(hay)) return "WEB-DL";
+  if (/\b(?:hdrip|dvdrip)\b/i.test(hay)) return "HDRip";
+  if (/\b(?:cam|camrip|hdcam|ts|telesync)\b/i.test(hay)) return "CAM";
+  if (/\.(?:zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(fullUrl) || /sub|subtitle|උපසිරැසි/i.test(hay)) {
+    return "Subtitle";
+  }
+
+  return "Standard";
+}
+
 function shadow_abs_url(rawLink, baseOrigin = shadow_base_url) {
   if (!rawLink) return null;
   const trimmed = String(rawLink).trim();
@@ -42,13 +104,17 @@ function shadow_abs_url(rawLink, baseOrigin = shadow_base_url) {
     !trimmed ||
     trimmed.startsWith("javascript:") ||
     trimmed.startsWith("mailto:") ||
+    trimmed.startsWith("tel:") ||
     trimmed.startsWith("#") ||
-    trimmed.startsWith("data:")
+    trimmed.startsWith("data:") ||
+    trimmed.startsWith("tg:")
   ) {
     return null;
   }
   try {
-    return new URL(trimmed, baseOrigin).toString();
+    const resolved = new URL(trimmed, baseOrigin).toString();
+    if (shadow_has_telegram(resolved)) return null;
+    return resolved;
   } catch (_) {
     return null;
   }
@@ -80,6 +146,8 @@ function shadow_is_junk_item(title = "", fullUrl = "", pathname = "") {
   const p = String(pathname).trim().toLowerCase();
   const u = String(fullUrl).trim().toLowerCase();
 
+  if (shadow_is_dead_or_bad_url(fullUrl, title)) return true;
+
   if (
     p === "/" ||
     p === "/movies" ||
@@ -101,7 +169,6 @@ function shadow_is_junk_item(title = "", fullUrl = "", pathname = "") {
     p.startsWith("/page/") ||
     p.includes("/author/") ||
     p.includes("/wp-") ||
-    p.includes("/cdn-cgi/") ||
     u.includes("?sort=") ||
     u.includes("?language=") ||
     u.includes("become-a-contributor") ||
@@ -143,11 +210,9 @@ function shadow_is_junk_item(title = "", fullUrl = "", pathname = "") {
     return true;
   }
 
-  // Keep actual movie/tv/subtitle posts
   const isContentPath = /^\/(?:movies|tv|series|episodes|subtitles)\/[^/]+/i.test(p);
-  const hasMediaHint = /sinhala\s*sub|උපසිරැසි|s\d{1,2}\s*[:e]?\s*e?\d{1,2}|\(\d{4}\)|tv series|movie/i.test(
-    t
-  );
+  const hasMediaHint =
+    /sinhala\s*sub|උපසිරැසි|s\d{1,2}\s*[:e]?\s*e?\d{1,2}|\(\d{4}\)|tv series|movie/i.test(t);
 
   return !(isContentPath || hasMediaHint);
 }
@@ -217,7 +282,9 @@ function shadow_parse_results(html, baseUrl, mode = "all") {
 
     seenUrls.add(fullUrl);
 
-    const imgMatch = surrounding.match(/<img\b[^>]*?(?:data-src|src)=["'](https?:\/\/[^"']+)["']/i);
+    const imgMatch = surrounding.match(
+      /<img\b[^>]*?(?:data-src|src)=["'](https?:\/\/[^"']+)["']/i
+    );
     const posterUrl = imgMatch ? shadow_abs_url(imgMatch[1], fullUrl) : null;
 
     items.push({
@@ -351,15 +418,20 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
     if (!absLink || seenLinks.has(absLink)) continue;
 
     const label = shadow_strip_tags(anchor[2]) || "Download";
+    if (shadow_is_dead_or_bad_url(absLink, label)) continue;
+
+    const quality = shadow_detect_quality(label, absLink);
     const lowerCombo = `${absLink} ${label}`.toLowerCase();
 
     if (
+      quality === "Subtitle" ||
       /\.(?:zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(lowerCombo) ||
       /sub|subtitle|උපසිරැසි/.test(lowerCombo)
     ) {
       seenLinks.add(absLink);
       subtitles.push({
         label,
+        quality: "Subtitle",
         url: absLink,
       });
       continue;
@@ -367,13 +439,14 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
 
     const matchPattern =
       mode === "dp"
-        ? /\.(?:mp4|mkv|avi|webm|7z|iso|torrent|zip|rar)(?:\?|$)|(?:pack|season|batch|episode|ep|download|dl|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox)/i
+        ? /\.(?:mp4|mkv|avi|webm|7z|iso|torrent|zip|rar)(?:\?|$)|(?:pack|season|batch|episode|ep|download|dl|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i
         : /\.(?:mp4|mkv|avi|webm|7z|iso|torrent)(?:\?|$)|(?:download|dl|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i;
 
     if (matchPattern.test(lowerCombo)) {
       seenLinks.add(absLink);
       links.push({
         label,
+        quality,
         url: absLink,
       });
     }
