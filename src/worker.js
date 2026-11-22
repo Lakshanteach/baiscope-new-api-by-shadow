@@ -1,0 +1,410 @@
+// baiscope.lk scraper worker (search, info, dl, searchtv, dp)
+
+const shadow_creator = "Creator - 👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
+const shadow_base_url = "https://www.baiscope.lk";
+
+const shadow_headers = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9,si;q=0.8",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  Referer: `${shadow_base_url}/`,
+};
+
+function shadow_json(payload, statusCode = 200) {
+  return new Response(
+    JSON.stringify(
+      {
+        creator: shadow_creator,
+        ...payload,
+      },
+      null,
+      2
+    ),
+    {
+      status: statusCode,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      },
+    }
+  );
+}
+
+function shadow_abs_url(rawLink, baseOrigin = shadow_base_url) {
+  if (!rawLink) return null;
+  const trimmed = String(rawLink).trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith("javascript:") ||
+    trimmed.startsWith("mailto:") ||
+    trimmed.startsWith("#")
+  ) {
+    return null;
+  }
+  try {
+    return new URL(trimmed, baseOrigin).toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+function shadow_strip_tags(rawHtml = "") {
+  return String(rawHtml)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&ndash;/g, "-")
+    .replace(/&hellip;/g, "...")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shadow_is_cf_challenge(htmlText = "") {
+  return /__cf_chl_|cf-browser-verification|just a moment\.\.\.|checking your browser before accessing/i.test(
+    htmlText
+  );
+}
+
+async function shadow_fetch_html(targetUrl) {
+  const abortCtrl = new AbortController();
+  const timerId = setTimeout(() => abortCtrl.abort(), 15000);
+
+  try {
+    const res = await fetch(targetUrl, {
+      signal: abortCtrl.signal,
+      headers: shadow_headers,
+      redirect: "follow",
+    });
+
+    const bodyText = await res.text();
+    const challenged = shadow_is_cf_challenge(bodyText);
+
+    return {
+      status: res.status,
+      ok: res.ok && !challenged,
+      challenged,
+      finalUrl: res.url || targetUrl,
+      html: bodyText,
+    };
+  } finally {
+    clearTimeout(timerId);
+  }
+}
+
+function shadow_parse_results(html, baseUrl, mode = "all") {
+  const seenUrls = new Set();
+  const items = [];
+
+  for (const anchor of html.matchAll(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  )) {
+    const fullUrl = shadow_abs_url(anchor[1], baseUrl);
+    if (!fullUrl) continue;
+
+    let parsed;
+    try {
+      parsed = new URL(fullUrl);
+    } catch (_) {
+      continue;
+    }
+
+    if (!parsed.hostname.endsWith("baiscope.lk")) continue;
+    const pLower = parsed.pathname.toLowerCase();
+
+    if (
+      pLower === "/" ||
+      pLower.startsWith("/category/") ||
+      pLower.startsWith("/tag/") ||
+      pLower.startsWith("/page/") ||
+      pLower.includes("/author/") ||
+      pLower.includes("/wp-") ||
+      pLower.includes("/cdn-cgi/") ||
+      /\.(?:jpg|jpeg|png|gif|webp|css|js|xml)$/i.test(pLower)
+    ) {
+      continue;
+    }
+
+    if (seenUrls.has(fullUrl)) continue;
+
+    const cleanTitle = shadow_strip_tags(anchor[2]);
+    if (!cleanTitle || cleanTitle.length < 3) continue;
+
+    const surrounding = html.slice(
+      Math.max(0, anchor.index - 500),
+      Math.min(html.length, anchor.index + anchor[0].length + 500)
+    );
+
+    if (mode === "tv") {
+      const hay = `${cleanTitle} ${pLower} ${surrounding}`.toLowerCase();
+      if (!/season|episode|s\d{1,2}|e\d{1,2}|series|tv|show|කතාමාලාව/i.test(hay)) {
+        continue;
+      }
+    }
+
+    seenUrls.add(fullUrl);
+
+    const imgMatch = surrounding.match(/<img\b[^>]*?(?:data-src|src)=["']([^"']+)["']/i);
+    const posterUrl = imgMatch ? shadow_abs_url(imgMatch[1], fullUrl) : null;
+
+    items.push({
+      title: cleanTitle,
+      url: fullUrl,
+      image: posterUrl,
+    });
+  }
+
+  return items;
+}
+
+async function shadow_search_items(queryText, pageNum = 1, mode = "all") {
+  const safePage = Math.max(1, parseInt(pageNum, 10) || 1);
+  const searchUrl =
+    safePage > 1
+      ? `${shadow_base_url}/page/${safePage}/?s=${encodeURIComponent(queryText)}`
+      : `${shadow_base_url}/?s=${encodeURIComponent(queryText)}`;
+
+  const fetched = await shadow_fetch_html(searchUrl);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      query: queryText,
+      page: safePage,
+      source: searchUrl,
+      cloudflareChallenge: fetched.challenged,
+      error: fetched.challenged
+        ? "Blocked by Cloudflare challenge on baiscope.lk"
+        : `HTTP ${fetched.status}`,
+      items: [],
+    };
+  }
+
+  const items = shadow_parse_results(fetched.html, fetched.finalUrl, mode);
+
+  return {
+    ok: true,
+    query: queryText,
+    page: safePage,
+    source: fetched.finalUrl,
+    total: items.length,
+    items,
+  };
+}
+
+async function shadow_scrape_info(targetUrl) {
+  const fetched = await shadow_fetch_html(targetUrl);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      url: targetUrl,
+      cloudflareChallenge: fetched.challenged,
+      error: fetched.challenged
+        ? "Blocked by Cloudflare challenge on baiscope.lk"
+        : `HTTP ${fetched.status}`,
+    };
+  }
+
+  const html = fetched.html;
+
+  const h1Match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  const ogTitleMatch = html.match(
+    /<meta\b[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i
+  );
+  const titleTagMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+
+  const title =
+    (h1Match && shadow_strip_tags(h1Match[1])) ||
+    (ogTitleMatch && shadow_strip_tags(ogTitleMatch[1])) ||
+    (titleTagMatch && shadow_strip_tags(titleTagMatch[1])) ||
+    "Unknown Title";
+
+  const ogImgMatch = html.match(
+    /<meta\b[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i
+  );
+  const image = ogImgMatch ? shadow_abs_url(ogImgMatch[1], fetched.finalUrl) : null;
+
+  const ogDescMatch = html.match(
+    /<meta\b[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i
+  );
+  const metaDescMatch = html.match(
+    /<meta\b[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i
+  );
+  const description =
+    (ogDescMatch && shadow_strip_tags(ogDescMatch[1])) ||
+    (metaDescMatch && shadow_strip_tags(metaDescMatch[1])) ||
+    null;
+
+  const plainText = shadow_strip_tags(html);
+  const imdbMatch = plainText.match(
+    /IMDb(?:\s*Rating)?\s*[:\-]?\s*([0-9](?:\.[0-9])?\s*\/\s*10|[0-9](?:\.[0-9])?)/i
+  );
+  const yearMatch = plainText.match(/\b(19\d{2}|20\d{2})\b/);
+
+  return {
+    ok: true,
+    url: fetched.finalUrl,
+    title,
+    image,
+    imdb: imdbMatch ? imdbMatch[1].replace(/\s+/g, "") : null,
+    year: yearMatch ? yearMatch[1] : null,
+    description,
+  };
+}
+
+async function shadow_scrape_links(targetUrl, mode = "dl") {
+  const fetched = await shadow_fetch_html(targetUrl);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      url: targetUrl,
+      cloudflareChallenge: fetched.challenged,
+      error: fetched.challenged
+        ? "Blocked by Cloudflare challenge on baiscope.lk"
+        : `HTTP ${fetched.status}`,
+      links: [],
+      subtitles: [],
+    };
+  }
+
+  const html = fetched.html;
+  const seenLinks = new Set();
+  const links = [];
+  const subtitles = [];
+
+  for (const anchor of html.matchAll(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
+  )) {
+    const absLink = shadow_abs_url(anchor[1], fetched.finalUrl);
+    if (!absLink || seenLinks.has(absLink)) continue;
+
+    const label = shadow_strip_tags(anchor[2]) || "Download";
+    const lowerCombo = `${absLink} ${label}`.toLowerCase();
+
+    if (
+      /\.(?:zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(lowerCombo) ||
+      /sub|subtitle|උපසිරැසි/.test(lowerCombo)
+    ) {
+      seenLinks.add(absLink);
+      subtitles.push({
+        label,
+        url: absLink,
+      });
+      continue;
+    }
+
+    const matchPattern =
+      mode === "dp"
+        ? /\.(?:mp4|mkv|avi|webm|7z|iso|torrent|zip|rar)(?:\?|$)|(?:pack|season|batch|episode|ep|download|dl|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox)/i
+        : /\.(?:mp4|mkv|avi|webm|7z|iso|torrent)(?:\?|$)|(?:download|dl|mirror|pixeldrain|gdrive|drive\.google|mega\.nz|mediafire|1fichier|gofile|terabox|480p|720p|1080p|2160p|4k)/i;
+
+    if (matchPattern.test(lowerCombo)) {
+      seenLinks.add(absLink);
+      links.push({
+        label,
+        url: absLink,
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    url: fetched.finalUrl,
+    mode,
+    totalLinks: links.length,
+    totalSubtitles: subtitles.length,
+    links,
+    subtitles,
+  };
+}
+
+export default {
+  async fetch(req) {
+    if (req.method === "OPTIONS") {
+      return shadow_json({ ok: true }, 200);
+    }
+
+    const parsedUrl = new URL(req.url);
+    const routePath = parsedUrl.pathname.replace(/\/+$/, "") || "/";
+
+    try {
+      if (routePath === "/health") {
+        return shadow_json({
+          ok: true,
+          status: "ready",
+          target: shadow_base_url,
+          endpoints: [
+            "/search?q=<query>&page=1",
+            "/info?url=<baiscope_url>",
+            "/dl?url=<baiscope_url>",
+            "/searchtv?q=<query>&page=1",
+            "/dp?url=<baiscope_url>",
+          ],
+        });
+      }
+
+      if (routePath === "/search") {
+        const q = (parsedUrl.searchParams.get("q") || "").trim();
+        const page = parsedUrl.searchParams.get("page") || "1";
+        if (!q) {
+          return shadow_json({ ok: false, error: "Missing 'q' query parameter" }, 400);
+        }
+        const data = await shadow_search_items(q, page, "all");
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/searchtv") {
+        const q = (parsedUrl.searchParams.get("q") || "").trim();
+        const page = parsedUrl.searchParams.get("page") || "1";
+        if (!q) {
+          return shadow_json({ ok: false, error: "Missing 'q' query parameter" }, 400);
+        }
+        const data = await shadow_search_items(q, page, "tv");
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/info") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target)) {
+          return shadow_json({ ok: false, error: "Valid 'url' query parameter required" }, 400);
+        }
+        const data = await shadow_scrape_info(target);
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/dl") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target)) {
+          return shadow_json({ ok: false, error: "Valid 'url' query parameter required" }, 400);
+        }
+        const data = await shadow_scrape_links(target, "dl");
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/dp") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target)) {
+          return shadow_json({ ok: false, error: "Valid 'url' query parameter required" }, 400);
+        }
+        const data = await shadow_scrape_links(target, "dp");
+        return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      return shadow_json({ ok: false, error: "Endpoint not found" }, 404);
+    } catch (err) {
+      return shadow_json(
+        {
+          ok: false,
+          error: err?.message || "Worker error",
+        },
+        500
+      );
+    }
+  },
+};
