@@ -109,7 +109,8 @@ function shadow_detect_quality(label = "", fullUrl = "") {
   if (/\b(?:cam|camrip|hdcam|ts|telesync)\b/i.test(hay)) return "CAM";
   if (
     /\.(?:zip|rar|srt|vtt|ass|sub)(?:\?|$)/i.test(fullUrl) ||
-    /\/download\//i.test(fullUrl)
+    /\/download\//i.test(fullUrl) ||
+    /\bsub(?:title|titles)?\b/i.test(hay)
   ) {
     return "Subtitle";
   }
@@ -375,6 +376,33 @@ async function shadow_search_items(queryText, pageNum = 1, mode = "movie") {
   };
 }
 
+function shadow_extract_series_base_name(titleOrUrl = "") {
+  let raw = String(titleOrUrl || "").toLowerCase();
+  try {
+    if (/^https?:\/\//i.test(raw)) {
+      const u = new URL(raw);
+      raw = u.pathname.split("/").filter(Boolean).pop() || raw;
+    }
+  } catch (_) {}
+
+  raw = raw
+    .replace(/-sinhala-subtitles?.*$/i, "")
+    .replace(/\bs\d{1,2}[\s_-]*[:e-]*\s*e?\d{1,2}(?:-\s*e?\d{1,2})?\b.*$/i, "")
+    .replace(/\be\d{1,2}\b.*$/i, "")
+    .replace(/sinhala\s*subtitles?.*$/i, "")
+    .replace(/\[[^\]]*\]|\([^\)]*\)/g, " ")
+    .replace(/[^a-z0-9\s-]/g, " ")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const stopWords = new Set(["the", "a", "an", "and", "of", "in", "on", "to", "for"]);
+  return raw
+    .split(" ")
+    .filter((w) => w.length >= 2 && !stopWords.has(w))
+    .join(" ");
+}
+
 async function shadow_scrape_episodes(seriesUrl) {
   const fetched = await shadow_fetch_html(seriesUrl);
   if (!fetched.ok) {
@@ -390,14 +418,27 @@ async function shadow_scrape_episodes(seriesUrl) {
   }
 
   const html = fetched.html;
+  const h1Match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  const currentTitle = (h1Match && shadow_strip_tags(h1Match[1])) || "Episode";
+  const seriesKey = shadow_extract_series_base_name(currentTitle || fetched.finalUrl);
+  const keyTokens = seriesKey.split(" ").filter(Boolean);
+
   const seen = new Set();
-  const episodes = [];
+  const matchedEpisodes = [];
+  const navEpisodes = [];
+
+  // Always include current episode first
+  seen.add(fetched.finalUrl);
+  matchedEpisodes.push({
+    title: currentTitle,
+    url: fetched.finalUrl,
+  });
 
   for (const anchor of html.matchAll(
     /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
   )) {
     const abs = shadow_abs_url(anchor[1], fetched.finalUrl);
-    if (!abs || seen.has(abs) || abs === fetched.finalUrl) continue;
+    if (!abs || seen.has(abs)) continue;
 
     let parsed;
     try {
@@ -410,37 +451,49 @@ async function shadow_scrape_episodes(seriesUrl) {
     const pLower = parsed.pathname.toLowerCase();
     const label = shadow_strip_tags(anchor[2]);
     if (!label || label.length < 2) continue;
+    if (/\/download\//i.test(pLower)) continue;
     if (shadow_is_dead_or_bad_url(abs, label)) continue;
 
-    const isEpisodeLink =
-      /\/(?:tv|episodes|series)\/[^/]+/i.test(pLower) ||
-      /\bs\d{1,2}\s*[:e]?\s*e?\d{1,2}\b|\bepisode\s*\d+|\be\d{1,2}\b|\bseason\s*\d+/i.test(
-        `${label} ${pLower}`
-      );
+    const isEpisodePath = /\/(?:tv|episodes|series)\/[^/]+/i.test(pLower);
+    if (!isEpisodePath) continue;
 
-    if (isEpisodeLink) {
+    const normCandidate = `${label.toLowerCase().replace(/[^a-z0-9\s-]/g, " ")} ${pLower.replace(
+      /[-_]+/g,
+      " "
+    )}`;
+
+    const isSameSeries =
+      seriesKey.length >= 3 &&
+      (normCandidate.includes(seriesKey) ||
+        (keyTokens.length >= 2 && keyTokens.every((tok) => normCandidate.includes(tok))) ||
+        (keyTokens.length === 1 && normCandidate.includes(keyTokens[0])));
+
+    const isPrevNextNav =
+      /←\s*previous|next\s*→|previous\s*episode|next\s*episode/i.test(label) && isSameSeries;
+
+    if (isSameSeries) {
       seen.add(abs);
-      episodes.push({
+      matchedEpisodes.push({
+        title: label,
+        url: abs,
+      });
+    } else if (isPrevNextNav) {
+      seen.add(abs);
+      navEpisodes.push({
         title: label,
         url: abs,
       });
     }
   }
 
-  if (episodes.length === 0) {
-    const h1Match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
-    const epTitle = (h1Match && shadow_strip_tags(h1Match[1])) || "Episode";
-    episodes.push({
-      title: epTitle,
-      url: fetched.finalUrl,
-    });
-  }
+  const finalEpisodes = [...matchedEpisodes, ...navEpisodes];
 
   return {
     ok: true,
     url: fetched.finalUrl,
-    total: episodes.length,
-    episodes,
+    series: seriesKey || currentTitle,
+    total: finalEpisodes.length,
+    episodes: finalEpisodes,
   };
 }
 
