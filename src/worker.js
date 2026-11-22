@@ -263,6 +263,28 @@ async function shadow_fetch_html(targetUrl) {
   }
 }
 
+function shadow_parse_gate_html(html = "") {
+  const idMatch = html.match(/\bdata-id=["']([^"']+)["']/i);
+  const slugMatch = html.match(/\bdata-slug=["']([^"']+)["']/i);
+  const tokenMatch = html.match(/\bdata-token=["']([^"']+)["']/i);
+  const waitMatch = html.match(/\bdata-wait=["']([^"']+)["']/i);
+  const retryMatch = html.match(/\bdata-retry=["']([^"']+)["']/i);
+
+  const fileMetaMatch = html.match(
+    /([^<>\n]+\.(?:zip|rar|srt|vtt|mp4|mkv))\s*·\s*([0-9.]+\s*(?:KB|MB|GB))/i
+  );
+
+  return {
+    gateId: idMatch ? idMatch[1] : null,
+    slug: slugMatch ? slugMatch[1] : null,
+    token: tokenMatch ? tokenMatch[1] : null,
+    wait: waitMatch ? Number(waitMatch[1]) || 0 : 0,
+    retryPath: retryMatch ? retryMatch[1] : null,
+    fileName: fileMetaMatch ? fileMetaMatch[1].trim() : null,
+    fileSize: fileMetaMatch ? fileMetaMatch[2].trim() : null,
+  };
+}
+
 function shadow_parse_results(html, baseUrl, mode = "movie") {
   const seenUrls = new Set();
   const items = [];
@@ -405,7 +427,6 @@ async function shadow_scrape_episodes(seriesUrl) {
     }
   }
 
-  // If seriesUrl itself is a single episode page, include it if no child episodes found
   if (episodes.length === 0) {
     const h1Match = html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
     const epTitle = (h1Match && shadow_strip_tags(h1Match[1])) || "Episode";
@@ -543,10 +564,22 @@ async function shadow_scrape_links(targetUrl, mode = "dl") {
       /\/download\/[^/?#]+/i.test(linkPath)
     ) {
       seenLinks.add(absLink);
+
+      let gateInfo = null;
+      if (/\/download\/[^/?#]+/i.test(linkPath)) {
+        try {
+          const gatePage = await shadow_fetch_html(absLink);
+          if (gatePage.ok) {
+            gateInfo = shadow_parse_gate_html(gatePage.html);
+          }
+        } catch (_) {}
+      }
+
       subtitles.push({
         label,
         quality: "Subtitle",
         url: absLink,
+        gate: gateInfo,
       });
       continue;
     }
