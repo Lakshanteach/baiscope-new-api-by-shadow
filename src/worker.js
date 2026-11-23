@@ -1,6 +1,6 @@
-// baiscope.lk scraper worker (search, searchtv, episodes, info, dl, dp, proxy)
+// baiscope.lk scraper worker (search, searchtv, episodes, info, dl, dp, proxy, zipdl)
 
-const shadow_creator = "Creator - 👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
+const shadow_creator = "👨‍💻 SHADOW MOVIE X MAIN OWNER 👨‍💻";
 const shadow_base_url = "https://www.baiscope.lk";
 
 const shadow_headers = {
@@ -258,6 +258,7 @@ async function shadow_fetch_html(targetUrl) {
       challenged,
       finalUrl: res.url || targetUrl,
       html: bodyText,
+      headers: res.headers,
     };
   } finally {
     clearTimeout(timerId);
@@ -427,7 +428,6 @@ async function shadow_scrape_episodes(seriesUrl) {
   const matchedEpisodes = [];
   const navEpisodes = [];
 
-  // Always include current episode first
   seen.add(fetched.finalUrl);
   matchedEpisodes.push({
     title: currentTitle,
@@ -686,6 +686,94 @@ async function shadow_proxy_download(targetUrl) {
   });
 }
 
+async function shadow_try_zip_download(gateUrl) {
+  const gatePage = await shadow_fetch_html(gateUrl);
+  if (!gatePage.ok) {
+    return shadow_json(
+      {
+        ok: false,
+        challenged: gatePage.challenged,
+        downloadPage: gateUrl,
+        error: gatePage.challenged
+          ? "Cloudflare challenge on gate page"
+          : `Failed to open gate page (HTTP ${gatePage.status})`,
+      },
+      gatePage.challenged ? 403 : 502
+    );
+  }
+
+  const gate = shadow_parse_gate_html(gatePage.html);
+  const apiEndpoint = `${shadow_base_url}/api/download`;
+  const cookieHeader = gatePage.headers?.get("set-cookie") || "";
+
+  const baseReqHeaders = {
+    ...shadow_headers,
+    Referer: gatePage.finalUrl || gateUrl,
+    Origin: shadow_base_url,
+    ...(cookieHeader ? { Cookie: cookieHeader.split(";")[0] } : {}),
+  };
+
+  const attempts = [
+    {
+      headers: { ...baseReqHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: gate.gateId,
+        slug: gate.slug,
+        token: gate.token,
+      }),
+    },
+    {
+      headers: { ...baseReqHeaders, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        id: gate.gateId || "",
+        slug: gate.slug || "",
+        token: gate.token || "",
+      }).toString(),
+    },
+  ];
+
+  for (const att of attempts) {
+    if (!gate.token) break;
+    const postRes = await fetch(apiEndpoint, {
+      method: "POST",
+      headers: att.headers,
+      body: att.body,
+      redirect: "follow",
+    });
+
+    const ct = (postRes.headers.get("content-type") || "").toLowerCase();
+    if (postRes.ok && !ct.includes("text/html") && !ct.includes("application/json")) {
+      const outHeaders = new Headers();
+      outHeaders.set("Content-Type", ct || "application/zip");
+      outHeaders.set(
+        "Content-Disposition",
+        postRes.headers.get("content-disposition") ||
+          `attachment; filename="${gate.fileName || "subtitle.zip"}"`
+      );
+      const cl = postRes.headers.get("content-length");
+      if (cl) outHeaders.set("Content-Length", cl);
+      outHeaders.set("Access-Control-Allow-Origin", "*");
+
+      return new Response(postRes.body, {
+        status: 200,
+        headers: outHeaders,
+      });
+    }
+  }
+
+  return shadow_json(
+    {
+      ok: false,
+      challenged: true,
+      fileName: gate.fileName || "subtitle.zip",
+      fileSize: gate.fileSize || null,
+      downloadPage: gatePage.finalUrl || gateUrl,
+      error: "Cloudflare challenge blocks direct automated ZIP download",
+    },
+    403
+  );
+}
+
 export default {
   async fetch(req) {
     if (req.method === "OPTIONS") {
@@ -708,6 +796,7 @@ export default {
             "/info?url=<baiscope_url>",
             "/dl?url=<baiscope_url>",
             "/dp?url=<baiscope_url>",
+            "/zipdl?url=<download_gate_url>",
             "/proxy?url=<download_url>",
           ],
         });
@@ -767,6 +856,14 @@ export default {
         }
         const data = await shadow_scrape_links(target, "dp");
         return shadow_json(data, data.ok ? 200 : 502);
+      }
+
+      if (routePath === "/zipdl") {
+        const target = (parsedUrl.searchParams.get("url") || "").trim();
+        if (!target || !/^https?:\/\//i.test(target) || shadow_has_telegram(target)) {
+          return shadow_json({ ok: false, error: "Valid non-telegram 'url' required" }, 400);
+        }
+        return await shadow_try_zip_download(target);
       }
 
       if (routePath === "/proxy") {
